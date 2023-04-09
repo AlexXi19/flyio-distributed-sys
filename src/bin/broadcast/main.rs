@@ -3,7 +3,10 @@ use flyio_distributed_sys::*;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{StdoutLock, Write};
+use std::{
+    collections::HashSet,
+    io::{StdoutLock, Write},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -11,6 +14,7 @@ use std::io::{StdoutLock, Write};
 enum Payload {
     Broadcast { message: u32 },
     BroadcastOk {},
+    Gossip { message: u32 },
     Read {},
     ReadOk { messages: Vec<u32> },
     Topology { topology: Value },
@@ -20,19 +24,31 @@ enum Payload {
 struct BroadcastNode {
     id: usize,
     topology: Option<Value>,
-    messages: Vec<u32>,
+    messages: HashSet<u32>,
+    other_nodes: Vec<String>,
+    curr_node: String,
 }
 
 impl Node<(), Payload> for BroadcastNode {
     fn from_init(
         _state: (),
-        _init: Init,
+        init: Init,
         _tx: std::sync::mpsc::Sender<Event<Payload>>,
     ) -> anyhow::Result<Self> {
+        let mut other_nodes = init.node_ids.clone();
+        let index = init
+            .node_ids
+            .iter()
+            .position(|x| *x == init.node_id)
+            .unwrap();
+        other_nodes.remove(index);
+
         Ok(BroadcastNode {
             id: 1,
             topology: None,
-            messages: vec![],
+            messages: HashSet::new(),
+            other_nodes,
+            curr_node: init.node_id,
         })
     }
 
@@ -45,27 +61,37 @@ impl Node<(), Payload> for BroadcastNode {
         match reply.body.payload {
             Payload::Broadcast { message } => {
                 reply.body.payload = Payload::BroadcastOk {};
-                serde_json::to_writer(&mut *output, &reply)
-                    .context("serialize response to init")?;
-                output.write_all(b"\n").context("write trailing newline")?;
-                self.messages.push(message);
+                reply.send(output)?;
+                self.messages.insert(message);
+                // Send message to other nodes
+                for node in &self.other_nodes {
+                    let gossip = Message {
+                        src: self.curr_node.clone(),
+                        dst: node.clone(),
+                        body: Body {
+                            id: None,
+                            in_reply_to: None,
+                            payload: Payload::Gossip { message },
+                        },
+                    };
+                    gossip.send(output)?;
+                }
+            }
+            Payload::Gossip { message } => {
+                self.messages.insert(message);
             }
             Payload::BroadcastOk { .. } => {}
             Payload::Read {} => {
                 reply.body.payload = Payload::ReadOk {
-                    messages: self.messages.clone(),
+                    messages: self.messages.clone().into_iter().collect(),
                 };
-                serde_json::to_writer(&mut *output, &reply)
-                    .context("serialize response to init")?;
-                output.write_all(b"\n").context("write trailing newline")?;
+                reply.send(output)?;
             }
             Payload::ReadOk { .. } => {}
             Payload::Topology { topology } => {
                 self.topology = Some(topology);
                 reply.body.payload = Payload::TopologyOk {};
-                serde_json::to_writer(&mut *output, &reply)
-                    .context("serialize response to init")?;
-                output.write_all(b"\n").context("write trailing newline")?;
+                reply.send(output)?
             }
             Payload::TopologyOk {} => {}
         }
