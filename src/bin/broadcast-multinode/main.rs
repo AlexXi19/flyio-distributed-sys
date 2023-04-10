@@ -1,12 +1,8 @@
 use flyio_distributed_sys::*;
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{
-    collections::HashSet,
-    io::{StdoutLock, Write},
-};
+use std::{collections::HashSet, io::StdoutLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
