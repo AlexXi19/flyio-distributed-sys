@@ -1,7 +1,6 @@
 use flyio_distributed_sys::*;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     io::StdoutLock,
@@ -35,6 +34,7 @@ struct BroadcastNode {
     id: usize,
     messages: HashSet<u32>,
     neighbors: HashMap<String, HashSet<u32>>,
+    neighbor_names: Vec<String>,
     curr_node: String,
 }
 
@@ -48,6 +48,7 @@ impl Node<(), Payload> for BroadcastNode {
             id: 1,
             messages: HashSet::new(),
             neighbors: HashMap::new(),
+            neighbor_names: vec![],
             curr_node: init.node_id,
         };
 
@@ -66,7 +67,6 @@ impl Node<(), Payload> for BroadcastNode {
                 reply.body.payload = Payload::BroadcastOk {};
                 reply.send(output)?;
                 self.messages.insert(message);
-                // Send message to other nodes
                 self.sync_with_neighbors(output)?
             }
             Payload::Gossip { seen } => {
@@ -82,7 +82,7 @@ impl Node<(), Payload> for BroadcastNode {
 
                 let mut gossip_ok = HashSet::new();
                 for message in self.messages.clone().into_iter() {
-                    // Need to send the seen back for the sender to know that we have seen it
+                    // Need to send the seen back for the sender to know that we have seen it else it will keep sending it, making the message longer and longer
                     if !neighbor_vec.contains(&message) || seen.contains(&message) {
                         gossip_ok.insert(message);
                     }
@@ -119,6 +119,7 @@ impl Node<(), Payload> for BroadcastNode {
                 for node in topology {
                     self.neighbors.insert(node.clone(), HashSet::new());
                 }
+                self.neighbor_names = topology.clone();
                 reply.body.payload = Payload::TopologyOk {};
                 reply.send(output)?
             }
@@ -131,24 +132,28 @@ impl Node<(), Payload> for BroadcastNode {
 
 impl BroadcastNode {
     fn sync_with_neighbors(&self, output: &mut StdoutLock) -> anyhow::Result<()> {
-        for node in self.neighbors.keys().into_iter() {
-            let seen_nodes = match self.neighbors.get(node) {
+        for node in &self.neighbor_names {
+            let seen_values = match self.neighbors.get(node) {
                 Some(x) => x,
                 None => return Ok(()),
             };
-            let unseen_nodes = self
-                .messages
-                .clone()
-                .into_iter()
-                .filter(|x| !seen_nodes.contains(x))
-                .collect::<Vec<_>>();
+
+            let mut unseen_values: Vec<u32> = vec![];
+            for message in &self.messages {
+                let message = *message;
+                if !seen_values.contains(&message) {
+                    unseen_values.extend(vec![message]);
+                }
+            }
             let gossip = Message {
                 src: self.curr_node.clone(),
                 dst: node.clone(),
                 body: Body {
                     id: None,
                     in_reply_to: None,
-                    payload: Payload::Gossip { seen: unseen_nodes },
+                    payload: Payload::Gossip {
+                        seen: unseen_values,
+                    },
                 },
             };
             gossip.send(output)?;
